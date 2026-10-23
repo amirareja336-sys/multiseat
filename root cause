@@ -1,0 +1,39 @@
+ ## Root Cause
+  
+  -b (build all) was run, but drm-lease-manager (build ID 1) was never compiled because either:
+  
+  • meson / ninja-build weren't installed at the time, or
+  • The build step failed silently and the -g git clone was taken as "done"
+  
+  The binary was never placed in $PATH (/usr/local/bin), and the runtime dir /var/local/run/drm-lease-manager/ was never created.
+  ──────
+  ## Fix — Run in this order
+  
+  1. Install missing build tools + packages:
+  
+    cd /home/senay/Projects/multiseat
+    sudo ./multiseat-mint.sh -gp
+  
+  2. Rebuild drm-lease-manager (ID 1):
+  
+    sudo ./multiseat-mint.sh -b 1
+  
+  3. Refresh library symlinks (creates /usr/lib/libdlmclient* and the systemd service):
+  
+    sudo ./multiseat-mint.sh -l
+  
+  4. Create the runtime directory (the script expects it to exist before drm-lease-manager runs):
+  
+    sudo mkdir -p /var/local/run/drm-lease-manager
+  
+  5. Start multiseat:
+  
+    sudo ./multiseat-mint.sh -s
+  ──────
+  │ Tip
+  │ After step 2 succeeds, you should see /usr/local/bin/drm-lease-manager exist. Verify with:
+  │
+  │   which drm-lease-manager
+  │
+  │ If it prints nothing, the meson install step failed — check the build output for errors.
+
