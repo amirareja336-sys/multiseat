@@ -50,6 +50,20 @@ if [[ "$1" == "--install" ]]; then
     exit 0
 fi
 
+# Show help without requiring root
+for arg in "$@"; do
+    if [[ "$arg" == "-h" || "$arg" == "--help" ]]; then
+        echo "Usage: multiseat-uninstall [OPTIONS]"
+        echo ""
+        echo "Options:"
+        echo "  --install   Install this script into /usr/local/bin & /usr/local/sbin"
+        echo "  --purge     Also remove built binaries and /home/multiseat source tree"
+        echo "  --reboot    Reboot the system immediately upon completion"
+        echo "  -h, --help  Show this help message"
+        exit 0
+    fi
+done
+
 # ------------------------------------------------------------------------------
 # 2. Privilege & Filesystem Verification
 # ------------------------------------------------------------------------------
@@ -80,16 +94,6 @@ for arg in "$@"; do
             ;;
         --reboot)
             REBOOT_PROMPT=true
-            ;;
-        -h|--help)
-            echo "Usage: multiseat-uninstall [OPTIONS]"
-            echo ""
-            echo "Options:"
-            echo "  --install   Install this script into /usr/local/bin & /usr/local/sbin"
-            echo "  --purge     Also remove built binaries and /home/multiseat source tree"
-            echo "  --reboot    Reboot the system immediately upon completion"
-            echo "  -h, --help  Show this help message"
-            exit 0
             ;;
     esac
 done
