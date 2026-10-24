@@ -10,7 +10,7 @@
 
 # !!!!!!!!! IMPORTANT !!!!!!!!!!!
 # until reboot is working, uncomment the line bellow and enable the service before each boot test
-# [[ "-S" == "$1" ]] && systemctl disable multiseat 
+[[ "-S" == "$1" ]] && systemctl disable multiseat
 
 ms_dir="/home/multiseat"
 wait_time=0.31s	# time between exist checks 
@@ -35,6 +35,9 @@ wb="$red[MultiSeat Builder]$white"
 ms="$red[MultiSeat]$white"
 oIFS=$IFS
 isnumber='^[0-9]+$'
+
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 
 shopt -s nullglob
 
@@ -271,14 +274,22 @@ case "$1" in
 
 	echo -e "$wb soft linking library files from /usr/local/... to /usr/..."
 	cd /usr/
-	mkdir -p include/libdlmclient local/lib/pkgconfig 
-	# wlroots on Ubuntu Noble builds as libwlroots-0.20.so (not 0.18)
-	for file in include/{libdlmclient/dlmclient.h,toml.h} lib/pkgconfig/{libdlmclient.pc,libtoml.pc} lib/{libdlmclient.so.0,libtoml.so,libwlroots-0.20.so}
+	mkdir -p include/libdlmclient local/lib/pkgconfig lib/pkgconfig lib/x86_64-linux-gnu/pkgconfig
+	# wlroots on Ubuntu Noble builds as libwlroots-0.18.so
+	for file in include/{libdlmclient/dlmclient.h,toml.h} lib/pkgconfig/{libdlmclient.pc,libtoml.pc} lib/{libdlmclient.so.0,libtoml.so,libwlroots-0.18.so,libwlroots-0.20.so}
 	do
-		! [ -e $file ] && ( ln -s /usr/local/$file $( dirname $file ) || exit 30 )
+		target=""
+		if [ -e "/usr/local/$file" ]; then
+			target="/usr/local/$file"
+		elif [ -e "/usr/local/lib/x86_64-linux-gnu/${file#lib/}" ]; then
+			target="/usr/local/lib/x86_64-linux-gnu/${file#lib/}"
+		fi
+		if [ -n "$target" ] && [ ! -e "$file" ]; then
+			ln -sf "$target" "$( dirname $file )" || exit 30
+		fi
 	done
 	# Refresh the dynamic linker cache so newly linked libs are found immediately
-	ldconfig /usr/local/lib
+	ldconfig /usr/local/lib /usr/local/lib/x86_64-linux-gnu 2>/dev/null || ldconfig
 		
 	echo -e "$wb creating build+cfg directories ..."
 	mkdir -p $ms_dir
@@ -313,7 +324,7 @@ case "$1" in
 		libglib2.0-dev libxml2-dev hwdata \
 		libliftoff-dev libdisplay-info-dev libneatvnc-dev \
 		libxcb-composite0-dev libxcb-render-util0-dev libxcb-icccm4-dev \
-		libunwind-dev xorg-dev libxcb-dev xcb-proto || exit 41
+		libunwind-dev xorg-dev libxcb1-dev xcb-proto || exit 41
 
 	# Compositor / app packages
 	apt-get install -y --no-install-recommends \
@@ -343,7 +354,10 @@ case "$1" in
 		exit
 	fi
 
-	[ -d $ms_dir ] || ( $0 -l ; $0 -gp ) # links and apt-get
+	if ! pkg-config --exists libdrm 2>/dev/null || [ ! -d "$ms_dir" ]; then
+		$0 -l || exit 30
+		$0 -gp || exit 40
+	fi
 
 	cd $ms_dir || exit 50
 
@@ -353,8 +367,21 @@ case "$1" in
          )
 
 	name=$( basename ${href[$2]} )
-	if ! cd $name/ 2> /dev/null || [[ "$1" == "-g" ]]
-	then
+	branch=( [2]='0.18' [3]='v0.8' )
+	patch_href=( [2]='raw.githubusercontent.com/garlett/multiseat/refs/heads/wlroots-0.18/multiseat' ) # /wlroots
+
+	needs_clone_or_patch=0
+	if ! cd $name/ 2> /dev/null || [[ "$1" == "-g" ]]; then
+		needs_clone_or_patch=1
+	elif [ -d ".git" ] && [ -n "${branch[$2]}" ]; then
+		curr_br=$(git branch --show-current 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null)
+		if [ "$curr_br" != "${branch[$2]}" ]; then
+			echo -e "$wb $name is on branch '$curr_br', switching to '${branch[$2]}' ..."
+			needs_clone_or_patch=1
+		fi
+	fi
+
+	if [ "$needs_clone_or_patch" -eq 1 ]; then
 		echo -e "$wb clonning/updating ($1 $2) $name ...."
 
 		if [[ "$name" != $( basename $( pwd ) ) ]]
@@ -364,11 +391,10 @@ case "$1" in
 		fi
 
 		git reset --hard
-		branch=( [2]='0.20' )
+		git clean -fd
 		[[ "${branch[$2]}" != "" ]] && git checkout ${branch[$2]}
 		git pull
 		
-		patch_href=( [2]='raw.githubusercontent.com/garlett/multiseat/refs/heads/wlroots-0.18/multiseat' ) # /wlroots
 		if [[ "${patch_href[$2]}" != "" ]]
 		then
 			echo -e "$wb patching with $( basename ${patch_href[$2]} ) ...."
@@ -378,8 +404,9 @@ case "$1" in
 
 		echo -e "$wb applying configs ...."
 
-	       	[[ "$name" == "tomlc99" ]] && mv libtoml.pc{.sample,}
-		[[ "$name" == "labwc" ]] && ln -s $ms_dir/wlroots $ms_dir/labwc/subprojects/
+		[[ "$name" == "tomlc99" ]] && mv libtoml.pc{.sample,}
+		[[ "$name" == "wlroots" ]] && sed -i 's/>=1.23/>=1.22/g' meson.build
+		[[ "$name" == "labwc" ]] && ln -sf $ms_dir/wlroots $ms_dir/labwc/subprojects/
 		[[ "$name" == "sfwbar" ]] && ! grep -q idle_timer $ms_dir/sfwbar/config/sfwbar.config && sed -i 's/Function("SfwbarInit") {/Module("idle")\nTriggerAction "idle_timer", Exec "wlopm --off *"\nTriggerAction "idle_resume", Exec "wlopm --on *"\nFunction("SfwbarInit") {\n\tIdleTimeout "idle_timer", "420"\n\tExec "wlopm --on *"/' $ms_dir/sfwbar/config/sfwbar.config # ugly --- maybe lbcryon could make it native, or this should not be in multiseat
 	fi
 
@@ -397,7 +424,7 @@ case "$1" in
 		if [ -e meson.build ]
 		then
 			[ -e build/ ] && rm -R build/
-			meson build || exit 70
+			meson setup build --libdir=lib || exit 70
 			ninja -C build || exit 80
 			ninja -C build install || exit 90
 		fi
