@@ -330,7 +330,7 @@ class Seat:
 class Config:
     DEV_RE = re.compile(r"^(usbk|usbm|usbd|ps2k|ps2m)\s+(\S+)(?:\s+#-\s*(.*))?$")
     SEAT_RE = re.compile(r"^(#?)\s*(card\d+-[^\s#]+)\s*(?:#.*)?$")
-    EXTRA_RE = re.compile(r"^(comp|open|spkr)\s+(.*)$")
+    EXTRA_RE = re.compile(r"^(user|comp|open|spkr)\s+(.*)$")
 
     def __init__(self):
         self.seats = []
@@ -401,7 +401,7 @@ class Config:
             for d in s.devs:
                 out.append("\t" + ("%s %s" % (d.kind, d.ident)).ljust(29) + " #- " +
                            (d.name or "").replace("\n", " "))
-            for k in ("comp", "open", "spkr"):
+            for k in ("user", "comp", "open", "spkr"):
                 if s.extra.get(k):
                     out.append("\t%s %s" % (k, s.extra[k]))
             out.append("")
@@ -736,6 +736,7 @@ class SeatsPage(Gtk.Box):
         exp = Gtk.Expander(label="Advanced")
         g = Gtk.Grid(row_spacing=4, column_spacing=6)
         for r, (key, label, hint) in enumerate([
+                ("user", "Seat user", "existing non-root username; blank creates a seat account"),
                 ("comp", "Compositor", "default: labwc ; sfwbar ; pcmanfm-qt --desktop"),
                 ("open", "Start app", "e.g. firefox   (separate several with ;)")]):
             g.attach(Gtk.Label(label=label, xalign=0), 0, r, 1, 1)
@@ -1215,19 +1216,15 @@ class MainWindow(Gtk.Window):
         if not self.need_script() or not self._save_first():
             return
         if self.status.get("dm"):
-            if not self.confirm(
-                    "A login screen is running on this GPU",
-                    "multiseat needs exclusive access to the GPU. While lightdm (or another display manager) is "
-                    "running, starting seats usually fails or freezes the screen.\n\nThe reliable way is "
-                    "'Enable at boot…' and a reboot. Start anyway?", "Start anyway"):
-                return
-        self.run_cmds("Start multiseat", [self.sc("-S")])
+            self.message("A login screen is running on this GPU",
+                         "Use Enable at boot and reboot to give multiseat exclusive access to the GPU.")
+            return
+        self.run_cmds("Start multiseat", [self.sc("-l"), ["systemctl", "start", "multiseat"]])
 
     def do_stop(self):
         if not self.need_script():
             return
-        flag = "-Q" if self.status.get("dm") else "-q"
-        self.run_cmds("Stop multiseat", [self.sc(flag)])
+        self.run_cmds("Stop multiseat", [["systemctl", "stop", "multiseat"], self.sc("-Q")])
 
     def do_enable(self):
         if not self.need_script() or not self._save_first():
@@ -1246,9 +1243,10 @@ class MainWindow(Gtk.Window):
         c1 = Gtk.CheckButton(label="Boot to text mode (multi-user.target) so the normal login screen does not "
                                    "compete for the GPU")
         c1.set_active(True)
+        c1.set_sensitive(False)  # The lease manager and LightDM share one DRM master.
         c2 = Gtk.CheckButton(label="First-boot safety: disable the service again as soon as it starts "
                                    "(a freeze can't repeat; re-enable here for each test)")
-        c2.set_active(True)
+        c2.set_active(False)
         for c in (c1, c2):
             c.get_child().set_line_wrap(True)
             box.pack_start(c, False, False, 0)
@@ -1280,7 +1278,7 @@ class MainWindow(Gtk.Window):
                             "Stops multiseat, disables it at boot and sets the default boot target to the "
                             "graphical login. Your seat configuration is kept.", "Restore"):
             return
-        cmds = [self.sc("-Q"), ["systemctl", "disable", "multiseat"],
+        cmds = [["systemctl", "stop", "multiseat"], self.sc("-Q"), ["systemctl", "disable", "multiseat"],
                 ["systemctl", "set-default", "graphical.target"]]
         self.run_cmds("Restore normal login", cmds,
                       lambda ok: self.toast("Done. Reboot to get the normal login screen."), stop_on_error=False)

@@ -1,4 +1,74 @@
-# Install and run
+# Linux Mint
+
+Use `multiseat-mint.sh` on Mint; `multiseat.sh` is the original Arch installer.
+The lease manager owns the GPU, so LightDM and multiseat cannot drive outputs
+on that same GPU simultaneously. Boot multiseat with `multi-user.target`.
+
+To update an existing installation, copy this checkout to a permanent location
+on the Mint machine, then run from that directory:
+
+```sh
+sudo bash ./multiseat-mint.sh -l
+sudo systemctl set-default multi-user.target
+sudo systemctl enable multiseat.service
+sudo reboot
+```
+
+For a new installation, `sudo bash ./multiseat-mint.sh -a` builds components,
+opens the hardware configuration, installs the service, and enables exclusive
+multiseat boot. The GUI's Enable at boot action performs the service setup too.
+Persistent boot is now the default; Boot test mode is optional and disables the
+service for the *next* boot. Turn it off in the GUI for persistent use, including
+when upgrading a script previously saved with that option enabled.
+
+Each enabled connector in `/etc/multiseat/*.conf` may specify an existing user:
+
+```text
+card0-VGA-1
+    user alice
+    # Keep the usbk/usbm or ps2k/ps2m assignments generated for this seat here.
+
+card0-HDMI-A-1
+    user bob
+```
+
+Use a different non-root account per seat; a shared account also shares its
+Wayland runtime directory. The GUI exposes this under each seat's Advanced
+settings. Blank `user` creates a locked system account named after the connector
+(for example `u0-vga-1`). It does not create a password-based login. Root (UID 0)
+is rejected. Root ownership of `/dev/dri/card*` itself is normal: the privileged
+lease manager opens the card and passes leases to non-root compositors.
+
+After reboot, check:
+
+```sh
+systemctl status multiseat.service 'dlm-*' 'multiseat-*'
+loginctl list-sessions
+journalctl -b -u multiseat.service -u 'dlm-*' -u 'multiseat-*'
+```
+
+The launcher should be `active (exited)` and the configured compositor units
+should be running. Display-manager should be inactive during multiseat use.
+Missing devices/leases fail startup with a timeout rather than proceeding with
+unusable seats. Plymouth is asked to release the display before boot startup.
+Starting from a running desktop is refused; for manual testing, switch to a text
+console, stop `display-manager.service`, and start `multiseat.service` there.
+
+To restore Mint's normal graphical login from a text console or recovery shell:
+
+```sh
+sudo systemctl disable --now multiseat.service
+sudo bash ./multiseat-mint.sh -Q
+sudo systemctl set-default graphical.target
+sudo reboot
+```
+
+The standalone `multiseat-uninstall.sh` can also remove old device attachments
+and restore the original setup. Linux GPU, PAM and reboot verification must be
+performed on the target hardware; the repository regression tests use mocked
+system commands and run with `python -m unittest discover -s tests` (Bash needed).
+
+# Arch Linux: install and run
 cd && wget https://raw.githubusercontent.com/garlett/multiseat/wlroots-0.20/{multiseat.sh,LICENSE} && chmod 770 multiseat.sh && ./multiseat.sh -a
 
 # multiseat

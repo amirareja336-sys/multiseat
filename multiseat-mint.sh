@@ -10,7 +10,7 @@
 
 # !!!!!!!!! IMPORTANT !!!!!!!!!!!
 # until reboot is working, uncomment the line bellow and enable the service before each boot test
-[[ "-S" == "$1" ]] && systemctl disable multiseat
+# [[ "-S" == "$1" ]] && systemctl disable multiseat
 
 ms_dir="/home/multiseat"
 wait_time=0.31s	# time between exist checks 
@@ -66,19 +66,23 @@ function wait_files(){ # $1 path    $2 files
 
 
 # wait vga cards
-vga_count=$( lspci | grep VGA | wc -l )
-while [ $vga_count -gt $( echo /sys/class/drm/card[0-9] | wc -w ) ]
-do
-	sleep $wait_time #wait_files /sys/class/drm/ card$((--vga_count))
-done
+# Only runtime commands need DRM devices. Installation and recovery must work
+# even when a driver or monitor is missing; wait_files bounds runtime waits.
 
 # config file name based on current hardware path configuration
-conf=$(find /sys/devices/pci* -type d -path "*/drm/card*/card*-*" -prune)
+conf=$(find /sys/devices/pci* -type d -path "*/drm/card*/card*-*" -prune 2>/dev/null)
 [[ "$conf" != "" ]] && conf=/etc/multiseat/_$( basename -a $conf | tr -cd "[:alnum:]" ).conf
 conf=${conf//card/}
 
 [[ "$conf" != "" ]] && ln -sf $conf /tmp/multiseat.conf
-! [ -e "$conf" ] && [[ "-S" == "$1" ]] && ( echo -e "$ms Config '$conf' not found!"; systemctl start getty@tty1.service ; killall multiseat.sh )
+case "$1" in
+    -s|-S|-r|-d|-G)
+        if [ ! -f "$conf" ] || [ -z "$(grep '^card[0-9]' "$conf")" ]; then
+            echo -e "$ms No enabled seats in config '$conf'." >&2
+            exit 11
+        fi
+        ;;
+esac
 
 
 
@@ -100,59 +104,56 @@ function start_seat2(){  # $1 lease    $2 user
 	[[ ${comp[@]} == "" ]] && comp=( $default_compositor )
 
 	# set default user 
-	if [[ "$2" == "" ]] || [[ $2 == 'guest' ]]
+	user=${2:-$(get_conf2 user "$1")}
+	if [[ "$user" == "" ]] || [[ $user == 'guest' ]]
 	then
-		if [[ $2 == 'guest' ]]
+		if [[ $user == 'guest' ]]
 		then
 			apps=( $guest_login_cmd )
 			comp=( ${comp[0]} sfwbar ) # change to greeter with idle_timer display turn off
 		fi
 		user=${1/card/u}
 		user=${user,,}
-	else
-		user=$2
 	fi
 	IFS=$oIFS
 
 	# config: new user, user home folder, labwc default link config
-	user_home="$( eval echo ~$user )"
-	if [ ! -d $user_home/Desktop ]
-	then
-		useradd $user > /dev/null 2>&1 # --no-user-group
-
-		user_home="$( eval echo ~$user )"
-		if [ ! -d $user_home ]
-		then 
-			user_home=/tmp/$user 
-			usermod $user --home $user_home
+	if ! id "$user" >/dev/null 2>&1; then
+		# Only create the deterministic guest account, never a mistyped user.
+		expected=${1/card/u}
+		if [[ "$user" != "${expected,,}" ]]; then
+			echo -e "$ms Seat user '$user' does not exist." >&2
+			return 21
 		fi
-		 
-		mkdir -p $user_home/Desktop
-		chown $user: -R $user_home
+		install -d "$ms_dir/users" || return 21
+		useradd --system --create-home --user-group --home-dir "$ms_dir/users/$user" "$user" || return 21
 	fi
+	user_id=$(id -u "$user") || return 21
+	if [ "$user_id" -eq 0 ]; then
+		echo -e "$ms Refusing to run seat $1 as root." >&2
+		return 21
+	fi
+	user_home=$(getent passwd "$user" | cut -d: -f6)
+	install -d -o "$user" -g "$(id -gn "$user")" "$user_home/Desktop" || return 21
 
 	resta="--property=RestartSec=1s --property=Restart=always "
 	param="$( [[ ${comp[0]} == "weston" ]] && echo --drm-lease=$1 ) "
  	user_id=$( id -u $user )
   	envs="--uid=$user_id --property=UMask=0006 " # 666 - 006 -> 660
 
-	wait_files /var/local/run/drm-lease-manager/ "$1 $1.lock" # || exit 19
+	wait_files /var/local/run/drm-lease-manager/ "$1 $1.lock" || return 19
 	chown $user: /var/local/run/drm-lease-manager/$1{,.lock} || exit 20
 
 	sys_layout=$(localectl status | awk '/X11 Layout/ {print $3}')
     sys_layout=${sys_layout:-us}
 
 	# compositor
-	systemctl set-environment \
-		SEATD_VTBOUND=0 \
-		XDG_SESSION_TYPE=wayland \
-		XKB_DEFAULT_LAYOUT="$sys_layout" \
-		XDG_SEAT=seat-$1 \
-		DRM_LEASE=$1 \
-		usbdvs="$( get_conf2 usbd $1 )" \
-		open=""
+	seat_env=(--setenv=SEATD_VTBOUND=0 --setenv=XDG_SESSION_TYPE=wayland
+		--setenv=XDG_SESSION_CLASS=user --setenv="XKB_DEFAULT_LAYOUT=$sys_layout"
+		--setenv="XDG_SEAT=seat-$1" --setenv="DRM_LEASE=$1"
+		--setenv="usbdvs=$(get_conf2 usbd "$1")" --setenv=open=)
 
-	systemd-run $envs $resta --unit=multiseat-$1 --property=PAMName=login --property=ExecStartPre="/bin/sleep .1" ${comp[0]} $param #-dVVV
+	systemd-run "${seat_env[@]}" $envs $resta --unit=multiseat-$1 --property=PAMName=login --property=ExecStartPre="/bin/sleep .1" ${comp[0]} $param || return 24
 				# sleep: wlroots or systemd is not openning session on first try
 	wait_files /run/user/$user_id/ wayland-0{,.lock} || exit 25
 
@@ -161,17 +162,17 @@ function start_seat2(){  # $1 lease    $2 user
 	envs+="--setenv=XDG_CURRENT_DESKTOP=wlroots "
 	envs+="--setenv=WAYLAND_DISPLAY=wayland-0 " # pam_systemd: cannot use one guest user, because conflicts on this 4 lines
  	envs+="--setenv=XDG_RUNTIME_DIR=/run/user/$user_id " 
-	envs+="--setenv=DBUS_SESSSION_BUS_ADDRESS=unix:path=/run/user/$user_id/bus "
+	envs+="--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$user_id/bus "
 	envs+="--setenv=DISPLAY=$( basename $( find /tmp/.X11-unix/ -maxdepth 1 -user $user ) | tr X : ) "
 	
  	for serv in "${comp[@]:1}"
  	do
-		systemd-run --unit=multiseat-$1-$(echo $serv | awk '{print $1;}')-$RANDOM $envs $resta $serv
+		systemd-run "${seat_env[@]}" --unit=multiseat-$1-$(echo $serv | awk '{print $1;}')-$RANDOM $envs $resta $serv
 	done
 
 	for app in "${apps[@]}"
 	do
-		systemd-run --unit=multiseat-$1-$(echo $app  | awk '{print $1;}')-$RANDOM $envs $app 
+		systemd-run "${seat_env[@]}" --unit=multiseat-$1-$(echo $app  | awk '{print $1;}')-$RANDOM $envs $app
 	done
 }
 
@@ -181,7 +182,7 @@ function start_seat2(){  # $1 lease    $2 user
 function get_conf2(){ #  $1 field    $2 card || seat pos || ""
 
 	# load cfgs, remove comments, append EOF delimiter
-	cfgs=$( sed -e "s/[[:space:]]*#.*//g ;s/[	]//g; /^[[:space:]]*$/d" $conf )$'\n'cardcard
+	cfgs=$( sed -e "s/[[:space:]]*#.*//g ;s/^[[:space:]]*//; /^[[:space:]]*$/d" "$conf" )$'\n'cardcard
 	
 	# return cards list
 	[[ "$1" == "card" ]] && [[ "$2" == "" ]] && echo -e "$cfgs" | grep "^card[0-9]" 
@@ -201,6 +202,10 @@ function get_conf2(){ #  $1 field    $2 card || seat pos || ""
 			
 			"card")
 				[[ $1 == "card" ]] && echo -n "" ${cfg}
+				;;
+
+			"user")
+				[[ $1 == "user" ]] && echo -n "${cfg:5}"
 				;;
 
 			"comp")
@@ -250,22 +255,22 @@ case "$1" in
 
     "-l") # create service and links
 	echo -e "$wb creating systemctl services ...."
-	ms_path=$( cd $( dirname $0 ) && pwd )/$( basename $0 )
+	ms_path=$(readlink -f "$0")
 
-	# On Ubuntu/Mint: do NOT conflict with getty@tty1 (lightdm is the display manager).
-	# Use Before=display-manager.service and After=multi-user.target instead.
+	# multi-user.target orders its wanted services before itself. Ordering this
+	# service after that target creates a boot ordering cycle.
 	cat <<- EOF > /etc/systemd/system/multiseat.service
 		[Unit]
 		Description=MultiSeat Launcher
-		Requires=multi-user.target
-		After=multi-user.target network.target
-		Before=display-manager.service
+		After=systemd-user-sessions.service
 
 		[Service]
-		ExecStart=$ms_path -S
-		ExecStopPost=$ms_path -q
+		ExecStartPre=-/usr/bin/plymouth quit
+		ExecStart=/bin/bash "$ms_path" -S
+		ExecStopPost=/bin/bash "$ms_path" -Q
 		RemainAfterExit=yes
-		Type=idle
+		Type=oneshot
+		TimeoutStartSec=180
 
 		[Install]
 		WantedBy=multi-user.target
@@ -296,7 +301,7 @@ case "$1" in
 	mkdir -m 2750 /etc/multiseat
 	chown -R :users /etc/multiseat
 
-	ms_dir_base="$( cd "$( dirname "$0" )" && pwd )"
+	ms_dir_base=$(dirname "$ms_path")
 	if [ -f "$ms_dir_base/multiseat-uninstall.sh" ]; then
 		echo -e "$wb installing uninstaller to /usr/local/bin/multiseat-uninstall ..."
 		mkdir -p /usr/local/bin /usr/local/sbin
@@ -347,9 +352,10 @@ case "$1" in
 	then 
 		for i in {0..5} 
 		do 
-			$0 $1 $i && continue
-			echo -e "$ms error $? as $1 $i"
-			exit
+			bash "$0" "$1" "$i" && continue
+			result=$?
+			echo -e "$ms error $result as $1 $i"
+			exit "$result"
 		done 
 		exit
 	fi
@@ -575,7 +581,9 @@ case "$1" in
 
 
 			# usb ownership ( qemu requires this )
-			user=$( loginctl | grep user | grep $card | xargs | cut -d " " -f 3 )
+			session=$(loginctl show-seat "seat-$card" -p ActiveSession --value)
+			user=$(loginctl show-session "$session" -p User --value 2>/dev/null)
+			[[ "$user" == 0 ]] && continue
 			[[ "$user" == "" ]] && echo "$( date ) $card" >> /tmp/usb_user_fail.log && continue # user=${1,,}
 			
 			for usb in $( get_conf2 usbd $card )
@@ -603,50 +611,57 @@ case "$1" in
 	
 	rm /var/local/run/drm-lease-manager/* 2> /dev/null
 
-	wait_files "/dev/dri/" "$( grep "^card[0-9]" $conf -o )"  # wait configured cards
+	wait_files "/dev/dri/" "$(grep -o '^card[0-9]*' "$conf" | sort -u)" || exit 19
 	
-	for card in /dev/dri/card*
+	for card in $(grep -o '^card[0-9]*' "$conf" | sort -u)
 	do
+		card=/dev/dri/$card
 		echo -e "$ms Starting drm-lease-manager services at $card ... "	
-		systemd-run $dlm_log --unit=dlm-$( basename $card ) drm-lease-manager $card
+		systemd-run $dlm_log --unit=dlm-$( basename $card ) drm-lease-manager $card || exit 18
 		# dlm only outputs when ran from terminal with no redirects
 	done #--property=RestartSec=1s --property=Restart=always /usr/local/bin/
 
-	wait_files "/var/local/run/drm-lease-manager/" "$( grep "^card*" $conf )" # wait configured crtcs 
+	wait_files "/var/local/run/drm-lease-manager/" "$(get_conf2 card)" || exit 19
 	;;
 
 
 
     "-r") # read config and start_seat     $2 seat name or pos    $3 user name
-	# set "master-of-seat" on input devices
-	# Ubuntu/Mint: udev rules may be at either path; try both
-	SEAT_RULES="/usr/lib/udev/rules.d/71-seat.rules"
-	[ -e "$SEAT_RULES" ] || SEAT_RULES="/lib/udev/rules.d/71-seat.rules"
-        sed -i 's/SUBSYSTEM=="input", KERNEL=="input\*", TAG+="seat"$/\&, TAG+="master-of-seat"/' \
-	        "$SEAT_RULES" || exit 110
+	# Older Mint releases replaced the package's input rule with a literal '&'.
+	# Remove only that malformed line; the local rule below supplies the input tags.
+	SEAT_RULES=/usr/lib/udev/rules.d/71-seat.rules
+	if [ -f "$SEAT_RULES" ] && grep -q '^&, TAG+="master-of-seat"$' "$SEAT_RULES"; then
+		sed -i '/^\&, TAG+="master-of-seat"$/d' "$SEAT_RULES" || exit 110
+	fi
+	# Keep package-owned rules intact. Input masters make the leased seats usable
+	# without attaching the entire shared GPU to one logind seat.
+	printf '%s\n' 'SUBSYSTEM=="input", KERNEL=="input*", TAG+="seat", TAG+="master-of-seat"' > /etc/udev/rules.d/71-multiseat-input.rules
 	udevadm control --reload && udevadm trigger || exit 120
 
 	for card in $( get_conf2 card $2 )
 	do
-		start_seat2 "$card" "$3"
-		seats+="$! "
+		for dev in $(get_conf2 devs "$card"); do
+			loginctl attach "seat-$card" "$dev" || exit 121
+		done
+		start_seat2 "$card" "$3" || exit $?
 	done
-	[[ "$seats" != "" ]] && wait $seats
 
 	;;
 
 
 
     "-s" | "-S") # start services
-
-	systemd-run $0 -G	# start guard service
-	. $0 -d 		# start dlm-lease-manager services
-	. $0 -r "" "guest" 	# start compositor seats services
-
-	[[ "$1" == "-s" ]] && read -p " waiting to stop root session ..."
-	O=$(loginctl | grep root) && loginctl kill-session ${O:0:7}
-	systemctl stop getty*
-	deallocvt
+	if systemctl is-active --quiet display-manager.service; then
+		echo -e "$ms Stop the display manager from a text console before starting multiseat." >&2
+		exit 16
+	fi
+	# Remove environment leaked by earlier versions. All new settings are per-unit.
+	systemctl unset-environment SEATD_VTBOUND XDG_SESSION_TYPE XKB_DEFAULT_LAYOUT XDG_SEAT DRM_LEASE usbdvs open
+	if ! bash "$0" -d || ! bash "$0" -r; then
+		bash "$0" -Q
+		exit 17
+	fi
+	systemd-run --unit=multiseat-guard bash "$(readlink -f "$0")" -G || exit 18
 	;;
 
 
@@ -676,29 +691,10 @@ case "$1" in
 	journalctl --no-hostname -b $2 | grep -e multiseat -e labwc -e seat | less
 	;;
 
-    "-a") # auto
-	$0 -b
-	$0 -c
-	if [[ "$(systemctl get-default)" == "graphical.target" ]]; then 
-		echo -e "$yellow WARNING: $white Your system is configured to use \"graphical.target\"."
-		echo "On Linux Mint / Ubuntu, this is typically managed by lightdm (the display manager)."
-		echo "Switching to multi-user.target will disable the graphical login screen."
-		echo "Only do this if you intend to manage all seats exclusively via multiseat."
-		echo ""
-		echo "If you are on a standard Mint desktop and just want multiseat alongside lightdm,"
-		echo "it is NOT recommended to change the default target."
-		echo ""
-		echo "Do you want to switch to multi-user.target anyway? (NOT recommended on Mint)"
-
-		read -p "[y/N]: " confirm
-        
-        if [[ $confirm == [yY] ]]; then
-            systemctl set-default multi-user.target
-            echo "Change completed"
-			echo "In principle, if you restart your computer now, the multiseat should work :)"
-		fi
-	fi 
-	systemctl enable multiseat
+    "-a") # auto: the lease manager requires exclusive ownership of the GPU
+	bash "$0" -b && bash "$0" -c && bash "$0" -l || exit 30
+	systemctl set-default multi-user.target && systemctl enable multiseat || exit 31
+	echo -e "$ms Enabled exclusive multiseat boot. Reboot to start seats."
 
 	;;
 
